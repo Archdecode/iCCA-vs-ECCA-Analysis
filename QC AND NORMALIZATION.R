@@ -1,12 +1,3 @@
-# QC and Normalization Pipeline
-# - Imports raw TCGA STAR counts and GEO microarray expression matrices
-# - Aligns both to sample_meta_master with consistency checks
-# - TCGA: removes STAR summary rows, strips gene ID versions, filters low-count
-#   genes, normalizes via DESeq2 -> dds/vsd objects
-# - GEO: extracts sample labels, filters low-expression probes, verifies
-#   RMA normalization
-# - Outputs all processed objects to results/processed/
-
 library(DESeq2)
 library(data.table)
 library(dplyr)

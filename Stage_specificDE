@@ -1,0 +1,271 @@
+# --- Libraries ---
+library(DESeq2)
+library(tidyverse)
+library(ggplot2)
+library(pheatmap)
+library(ggrepel)
+library(readxl)
+
+set.seed(1234)
+options(stringsAsFactors = FALSE)
+
+# --- Paths ---
+input_dir <- "C:/Users/Subhashis/Downloads"
+out_dir   <- "C:/Users/Subhashis/Desktop/OMICS_PBL"
+
+setwd(input_dir)
+dir.create(file.path(out_dir, "results/de"),      recursive = TRUE, showWarnings = FALSE)
+dir.create(file.path(out_dir, "results/figures"), recursive = TRUE, showWarnings = FALSE)
+dir.create(file.path(out_dir, "results/qc"),      recursive = TRUE, showWarnings = FALSE)
+
+# =============================================================================
+# STEP 1 — Load input files
+# =============================================================================
+dds <- readRDS("tcga_dds_new.rds")
+vsd <- readRDS("tcga_vsd_new.rds")
+
+cdr      <- as.data.frame(read_excel("TCGA-CDR-SupplementalTableS1.xlsx"))
+cdr_chol <- cdr[cdr$type == "CHOL",
+                c("bcr_patient_barcode", "type",
+                  "ajcc_pathologic_tumor_stage",
+                  "histological_type", "gender",
+                  "age_at_initial_pathologic_diagnosis",
+                  "OS", "OS.time")]
+
+cat("CDR CHOL patients:", nrow(cdr_chol), "\n")
+
+# =============================================================================
+# STEP 2 — Annotate samples with subtype and stage
+# =============================================================================
+sample_ids  <- colnames(dds)
+patient_ids <- substr(sample_ids, 1, 12)
+
+sample_clinical <- data.frame(
+  sample_id  = sample_ids,
+  patient_id = patient_ids,
+  stringsAsFactors = FALSE
+) %>%
+  left_join(cdr_chol, by = c("patient_id" = "bcr_patient_barcode")) %>%
+  mutate(
+    subtype = case_when(
+      grepl("intrahepatic", histological_type, ignore.case = TRUE) ~ "iCCA",
+      grepl("hilar|perihilar|distal", histological_type, ignore.case = TRUE) ~ "eCCA",
+      TRUE ~ NA_character_
+    ),
+    stage_group = case_when(
+      grepl("Stage I$|Stage II$", ajcc_pathologic_tumor_stage) ~ "Early",
+      grepl("Stage III|Stage IV",  ajcc_pathologic_tumor_stage) ~ "Late",
+      TRUE ~ NA_character_
+    )
+  )
+
+cat("\n--- Subtype x Stage ---\n")
+print(table(sample_clinical$subtype, sample_clinical$stage_group, useNA = "always"))
+
+# =============================================================================
+# STEP 3 — Filter to complete samples
+# =============================================================================
+complete_samples <- sample_clinical %>%
+  filter(!is.na(subtype) & !is.na(stage_group))
+
+cat("\nComplete samples:", nrow(complete_samples), "\n")
+cat("iCCA Early:", sum(complete_samples$subtype == "iCCA" & complete_samples$stage_group == "Early"), "\n")
+cat("iCCA Late:",  sum(complete_samples$subtype == "iCCA" & complete_samples$stage_group == "Late"),  "\n")
+cat("eCCA Early:", sum(complete_samples$subtype == "eCCA" & complete_samples$stage_group == "Early"), "\n")
+cat("eCCA Late:",  sum(complete_samples$subtype == "eCCA" & complete_samples$stage_group == "Late"),  "\n")
+
+dds_sub <- dds[, complete_samples$sample_id]
+colData(dds_sub)$subtype     <- factor(complete_samples$subtype,     levels = c("iCCA", "eCCA"))
+colData(dds_sub)$stage_group <- factor(complete_samples$stage_group, levels = c("Early", "Late"))
+
+# =============================================================================
+# STEP 4 — PCA plot
+# =============================================================================
+vsd_sub  <- vsd[, complete_samples$sample_id]
+expr_vsd <- assay(vsd_sub)
+pca      <- prcomp(t(expr_vsd), scale. = TRUE)
+pca_df   <- as.data.frame(pca$x[, 1:2])
+pca_df$subtype     <- complete_samples$subtype
+pca_df$stage_group <- complete_samples$stage_group
+pct_var  <- round(100 * pca$sdev^2 / sum(pca$sdev^2), 1)
+
+p_pca <- ggplot(pca_df, aes(PC1, PC2, color = subtype, shape = stage_group)) +
+  geom_point(size = 4, alpha = 0.85) +
+  scale_color_manual(values = c("iCCA" = "#2166AC", "eCCA" = "#D6604D")) +
+  labs(title = "PCA — TCGA-CHOL tumour samples",
+       x = paste0("PC1 (", pct_var[1], "%)"),
+       y = paste0("PC2 (", pct_var[2], "%)"),
+       color = "Subtype", shape = "Stage") +
+  theme_classic(base_size = 13)
+
+ggsave(file.path(out_dir, "results/qc/pca_subtype_stage.png"),
+       p_pca, width = 7, height = 5, dpi = 300)
+cat("PCA saved.\n")
+
+# =============================================================================
+# STEP 5 — Fit DESeq2 joint model with interaction term
+# =============================================================================
+design(dds_sub) <- ~ subtype + stage_group + subtype:stage_group
+dds_sub <- DESeq(dds_sub)
+
+cat("\nResultNames:\n")
+print(resultsNames(dds_sub))
+
+# =============================================================================
+# STEP 6 — Extract contrasts
+# =============================================================================
+tidy_res <- function(res, name) {
+  as.data.frame(res) %>%
+    rownames_to_column("gene_id") %>%
+    as_tibble() %>%
+    rename(log2FC = log2FoldChange) %>%
+    mutate(
+      contrast  = name,
+      sig       = !is.na(padj) & padj < 0.05 & abs(log2FC) > 1,
+      direction = case_when(
+        sig & log2FC > 0 ~ "UP",
+        sig & log2FC < 0 ~ "DOWN",
+        TRUE ~ "NS"
+      )
+    )
+}
+
+# iCCA: stage main effect (reference subtype)
+res_iCCA_df <- tidy_res(
+  results(dds_sub, name = "stage_group_Late_vs_Early", alpha = 0.05),
+  "iCCA_Late_vs_Early"
+)
+
+# Interaction: does stage effect differ in eCCA vs iCCA?
+res_interaction_df <- tidy_res(
+  results(dds_sub, name = "subtypeeCCA.stage_groupLate", alpha = 0.05),
+  "interaction_eCCA_vs_iCCA_stage"
+)
+
+# eCCA: stage effect = main + interaction combined
+res_eCCA_df <- tidy_res(
+  results(dds_sub,
+          contrast = list(c("stage_group_Late_vs_Early", "subtypeeCCA.stage_groupLate")),
+          alpha = 0.05),
+  "eCCA_Late_vs_Early"
+)
+
+cat("\niCCA significant:", sum(res_iCCA_df$sig, na.rm = TRUE), "\n")
+cat("eCCA significant:", sum(res_eCCA_df$sig, na.rm = TRUE), "\n")
+cat("Interaction significant:", sum(res_interaction_df$sig, na.rm = TRUE), "\n")
+
+# =============================================================================
+# STEP 7 — Merge and classify genes
+# =============================================================================
+res_merged <- res_iCCA_df %>%
+  select(gene_id, log2FC_iCCA = log2FC, padj_iCCA = padj, sig_iCCA = sig) %>%
+  full_join(
+    res_eCCA_df %>% select(gene_id, log2FC_eCCA = log2FC, padj_eCCA = padj, sig_eCCA = sig),
+    by = "gene_id"
+  ) %>%
+  full_join(
+    res_interaction_df %>% select(gene_id, log2FC_interaction = log2FC,
+                                   padj_interaction = padj, sig_interaction = sig),
+    by = "gene_id"
+  ) %>%
+  mutate(category = case_when(
+    sig_iCCA & sig_eCCA & sign(log2FC_iCCA) == sign(log2FC_eCCA) ~ "Shared_concordant",
+    sig_iCCA & sig_eCCA & sign(log2FC_iCCA) != sign(log2FC_eCCA) ~ "Shared_opposite",
+    sig_iCCA & !sig_eCCA                                          ~ "iCCA_specific",
+    !sig_iCCA & sig_eCCA                                          ~ "eCCA_specific",
+    TRUE                                                           ~ "Not_significant"
+  ))
+
+cat("\n--- Gene classification ---\n")
+print(table(res_merged$category))
+
+# =============================================================================
+# STEP 8 — Visualizations
+# =============================================================================
+
+# Volcano — iCCA
+top_iCCA <- res_iCCA_df %>% filter(sig) %>% arrange(padj) %>% head(15)
+p_vol_iCCA <- ggplot(res_iCCA_df, aes(log2FC, -log10(padj), color = direction)) +
+  geom_point(alpha = 0.5, size = 1.2) +
+  geom_text_repel(data = top_iCCA, aes(label = gene_id), size = 3, max.overlaps = 20) +
+  scale_color_manual(values = c("UP" = "#D6604D", "DOWN" = "#2166AC", "NS" = "grey70")) +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "grey40") +
+  geom_vline(xintercept = c(-1, 1), linetype = "dashed", color = "grey40") +
+  labs(title = "iCCA: Late vs Early", x = "log2FC", y = "-log10(padj)") +
+  theme_classic(base_size = 13)
+ggsave(file.path(out_dir, "results/figures/volcano_iCCA.png"),
+       p_vol_iCCA, width = 7, height = 6, dpi = 300)
+
+# Volcano — eCCA
+top_eCCA <- res_eCCA_df %>% filter(sig) %>% arrange(padj) %>% head(15)
+p_vol_eCCA <- ggplot(res_eCCA_df, aes(log2FC, -log10(padj), color = direction)) +
+  geom_point(alpha = 0.5, size = 1.2) +
+  geom_text_repel(data = top_eCCA, aes(label = gene_id), size = 3, max.overlaps = 20) +
+  scale_color_manual(values = c("UP" = "#D6604D", "DOWN" = "#2166AC", "NS" = "grey70")) +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "grey40") +
+  geom_vline(xintercept = c(-1, 1), linetype = "dashed", color = "grey40") +
+  labs(title = "eCCA: Late vs Early", x = "log2FC", y = "-log10(padj)") +
+  theme_classic(base_size = 13)
+ggsave(file.path(out_dir, "results/figures/volcano_eCCA.png"),
+       p_vol_eCCA, width = 7, height = 6, dpi = 300)
+
+# Scatter — iCCA vs eCCA log2FC comparison
+scatter_df <- res_merged %>%
+  filter(category != "Not_significant", !is.na(log2FC_iCCA), !is.na(log2FC_eCCA))
+
+if (nrow(scatter_df) > 0) {
+  p_scatter <- ggplot(scatter_df, aes(log2FC_iCCA, log2FC_eCCA, color = category)) +
+    geom_point(size = 2.5, alpha = 0.8) +
+    geom_hline(yintercept = 0, linetype = "dashed") +
+    geom_vline(xintercept = 0, linetype = "dashed") +
+    scale_color_manual(values = c(
+      "Shared_concordant" = "#1B7837", "Shared_opposite" = "#762A83",
+      "iCCA_specific"     = "#2166AC", "eCCA_specific"   = "#D6604D")) +
+    labs(title = "Stage genes: iCCA vs eCCA",
+         x = "log2FC iCCA (Late vs Early)",
+         y = "log2FC eCCA (Late vs Early)") +
+    theme_classic(base_size = 13)
+  ggsave(file.path(out_dir, "results/figures/scatter_iCCA_vs_eCCA.png"),
+         p_scatter, width = 7, height = 6, dpi = 300)
+  cat("Scatter plot saved.\n")
+}
+
+# Heatmap — top iCCA significant genes
+top_genes_heat <- res_iCCA_df %>%
+  filter(sig) %>% arrange(padj) %>% head(40) %>% pull(gene_id)
+
+if (length(top_genes_heat) >= 2) {
+  mat_heat <- expr_vsd[top_genes_heat, , drop = FALSE]
+  mat_heat <- t(scale(t(mat_heat)))
+  ann_col  <- data.frame(
+    Subtype = complete_samples$subtype,
+    Stage   = complete_samples$stage_group,
+    row.names = complete_samples$sample_id)
+  pheatmap(mat_heat,
+           annotation_col = ann_col,
+           show_colnames  = FALSE,
+           show_rownames  = TRUE,
+           fontsize_row   = 7,
+           color = colorRampPalette(c("#2166AC", "white", "#D6604D"))(50),
+           main  = "Top iCCA stage-associated genes",
+           filename = file.path(out_dir, "results/figures/heatmap_top_genes.png"),
+           width = 10, height = 8)
+  cat("Heatmap saved.\n")
+} else {
+  cat("Not enough significant genes for heatmap.\n")
+}
+
+# =============================================================================
+# STEP 9 — Export all results
+# =============================================================================
+write.csv(res_iCCA_df,        file.path(out_dir, "results/de/res_iCCA_stage.csv"),       row.names = FALSE)
+write.csv(res_eCCA_df,        file.path(out_dir, "results/de/res_eCCA_stage.csv"),        row.names = FALSE)
+write.csv(res_interaction_df, file.path(out_dir, "results/de/res_interaction.csv"),       row.names = FALSE)
+write.csv(res_merged,         file.path(out_dir, "results/de/res_merged_classified.csv"), row.names = FALSE)
+saveRDS(dds_sub,              file.path(out_dir, "results/de/tcga_dds_interaction.rds"))
+writeLines(capture.output(sessionInfo()),
+           file.path(out_dir, "results/de/sessionInfo_member3.txt"))
+
+cat("\n--- Member 3 complete ---\n")
+cat("DE files:\n");  print(list.files(file.path(out_dir, "results/de/")))
+cat("Figures:\n");   print(list.files(file.path(out_dir, "results/figures/")))

@@ -55,7 +55,7 @@ de_dir   <- results_dir
 proc_dir <- results_dir
 cdr_path <- file.path(results_dir, "TCGA-CDR-SupplementalTableS1.xlsx")
 
-# Output paths — R will create these fresh for your outputs
+# Output paths — R will create these fresh for outputs
 gsea_dir   <- file.path(results_dir, "results/gsea")
 fig_dir    <- file.path(results_dir, "results/figures")
 enrich_dir <- file.path(results_dir, "results/figures/gsea_enrichment_plots")
@@ -199,7 +199,7 @@ category_colors <- c(
 )
 
 
-# ---- 7A: NES scatter plot ---------------------------------------------------
+# NES scatter plot 
 
 cat("\nGenerating NES scatter plot...\n")
 
@@ -234,7 +234,7 @@ ggsave(file.path(fig_dir, "pathway_nes_scatter.png"),
        p_nes_scatter, width = 8, height = 7, dpi = 300)
 cat("NES scatter saved.\n")
 
----- 7B: Pathway heatmap ---------------------------------------------------
+#7B: Pathway heatmap 
 cat("Generating pathway heatmap...\n")
 
 key_pathways <- fg_wide %>%
@@ -282,7 +282,7 @@ if (length(key_pathways) >= 2) {
   cat("Not enough significant pathways for heatmap.\n")
 }
 
-# ---- 7C: Individual enrichment plots ---------------------------------------
+#7C: Individual enrichment plots 
 
 cat("Generating individual enrichment plots...\n")
 
@@ -362,7 +362,7 @@ expr_vsd_sym <- expr_vsd_sym[!duplicated(rownames(expr_vsd_sym)), ]
 cat("Expression matrix for ssGSEA:", nrow(expr_vsd_sym), "genes x",
     ncol(expr_vsd_sym), "samples\n")
 
-# GSVA >= 1.50 API; falls back to legacy call if older version installed
+
 gsva_scores <- tryCatch({
   gsva_param <- ssgseaParam(exprData = expr_vsd_sym, geneSets = msig_h, minSize = 5)
   gsva(gsva_param)
@@ -410,7 +410,7 @@ surv_df <- gsva_scores_df %>%
 cat("Samples with survival data:", nrow(surv_df), "\n")
 
 
-# ---- 9A: Cox regression for every significant pathway ----------------------
+#  Cox regression for every significant pathway 
 
 run_cox_pathways <- function(df, subtype_label, pathways_to_test) {
   df_sub <- df %>% filter(subtype == subtype_label)
@@ -459,7 +459,7 @@ write.csv(cox_all,
           file.path(gsea_dir, "cox_pathway_survival.csv"), row.names = FALSE)
 
 
-# ---- 9B: KM plots for top pathway per subtype ------------------------------
+# KM plots for top pathway per subtype 
 
 km_plot <- function(df, subtype_label, pathway_name, out_path) {
   df_sub <- df %>%
@@ -484,7 +484,6 @@ km_plot <- function(df, subtype_label, pathway_name, out_path) {
                   ylab        = "Overall survival",
                   legend.labs = c("High activity", "Low activity"))
   
-  # correct way to save ggsurvplot — use png() directly instead of ggsave
   png(out_path, width = 1000, height = 800, res = 120)
   print(p)
   dev.off()
@@ -509,7 +508,6 @@ if (length(top_eCCA_surv) > 0)
 writeLines(capture.output(sessionInfo()),
            file.path(gsea_dir, "sessionInfo_member4.txt"))
 
-cat("\n--- Member 4 complete ---\n")
 cat("GSEA outputs:\n");     print(list.files(gsea_dir))
 cat("Figures:\n");          print(list.files(fig_dir))
 cat("Enrichment plots:\n"); print(list.files(enrich_dir))

@@ -1,5 +1,5 @@
 # =============================================================================
-# GAP 4: Gene Symbol Conversion + Hub Gene Analysis
+# Gene Symbol Conversion + Hub Gene Analysis
 # iCCA vs eCCA Stage Transcriptomics Pipeline
 # =============================================================================
 # Description:

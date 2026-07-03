@@ -1,5 +1,5 @@
 # =============================================================================
-# GAP 6: Power Analysis + Sensitivity Analysis
+# Power Analysis + Sensitivity Analysis
 # iCCA vs eCCA Stage Transcriptomics Pipeline
 # =============================================================================
 # Description:

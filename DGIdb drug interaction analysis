@@ -1,0 +1,315 @@
+
+# ── 0. Libraries and paths ────────────────────────────────────────────────────
+
+library(tidyverse)
+library(ggplot2)
+
+INPUT_DIR  <- "data/DGIdb"          # folder containing the three TSV files
+OUTPUT_DE  <- "results/de"
+OUTPUT_FIG <- "results/figures"
+
+dir.create(OUTPUT_DE,  recursive = TRUE, showWarnings = FALSE)
+dir.create(OUTPUT_FIG, recursive = TRUE, showWarnings = FALSE)
+
+
+# ── 1. Load DGIdb exports ────────────────────────────────────────────────────
+# Files downloaded from dgidb.org using Bulk Search with Comma With Space
+# delimiter. Default interaction parameters used (all source databases
+# included), consistent with published approaches (Shen et al., 2025;
+# Wang et al., 2024).
+
+load_dgidb <- function(path, label) {
+  df <- read.delim(path, sep = "\t", stringsAsFactors = FALSE,
+                   na.strings = c("", "NA"))
+  colnames(df) <- c("gene", "drug", "approval",
+                     "indication", "score")
+  df$query_set <- label
+  message(sprintf("Loaded %d interactions for %s", nrow(df), label))
+  df
+}
+
+dgi_iCCA <- load_dgidb(
+  file.path(INPUT_DIR, "DGIdb_iCCA_hubs_raw.tsv"), "iCCA_hubs")
+
+dgi_eCCA <- load_dgidb(
+  file.path(INPUT_DIR, "DGIdb_eCCA_hubs.tsv"),     "eCCA_hubs")
+
+dgi_sig  <- load_dgidb(
+  file.path(INPUT_DIR, "DGIdb_signature.tsv"),      "Prognostic_signature")
+
+dgi_all  <- bind_rows(dgi_iCCA, dgi_eCCA, dgi_sig)
+
+cat("\n── Raw interaction counts by gene ──\n")
+print(table(dgi_all$gene, dgi_all$query_set))
+
+
+# ── 2. Classify interaction types ────────────────────────────────────────────
+# DGIdb v5 exports do not include a discrete interaction_type column.
+# Classification is therefore performed using known gene biology:
+#
+#   Direct_therapeutic : drug was designed to act ON the gene product
+#                        (receptor agonist/antagonist, enzyme inhibitor)
+#   Oncology_relevant  : pharmacokinetic gene with oncology drug substrate —
+#                        relevant to chemotherapy efficacy / resistance
+#   Pharmacokinetic    : gene metabolises or transports the drug;
+#                        does not imply the gene is a therapeutic target
+#
+# References for gene biology:
+#   ABCB1/ABCC2/ABCB4  : ABC efflux transporters (multidrug resistance)
+#   SLC22A7/SLCO1B3    : organic anion uptake transporters
+#   UGT1A9/UGT2B4      : UDP-glucuronosyltransferases (phase II metabolism)
+#   ADH1A              : alcohol dehydrogenase (phase I metabolism)
+#   SLC2A2             : GLUT2 glucose transporter
+#   CYP1A2/GSTM1       : cytochrome P450 / glutathione S-transferase
+#   ADRA2A             : alpha-2A adrenergic receptor (direct target)
+#   RPS4Y1/KDM5D/MBL2  : ribosomal / epigenetic / complement gene
+
+pk_genes <- c("ABCB1", "ABCB4", "ABCC2", "SLC2A2", "SLC22A7",
+               "SLCO1B3", "CYP1A2", "GSTM1", "UGT1A9",
+               "UGT2B4", "ADH1A")
+
+direct_therapeutic_genes <- c("ADRA2A", "RPS4Y1", "MBL2", "KDM5D")
+
+oncology_keywords <- paste0(
+  "antineoplastic|anticancer|chemotherapy|antitumor|",
+  "cancer|oncol|kinase inhibitor|tumor"
+)
+
+dgi_all <- dgi_all %>%
+  mutate(
+    # --- Interaction class ---
+    interaction_class = case_when(
+      gene %in% direct_therapeutic_genes
+        ~ "Direct_therapeutic",
+      gene %in% pk_genes &
+        str_detect(tolower(indication), oncology_keywords)
+        ~ "Oncology_relevant",
+      gene %in% pk_genes
+        ~ "Pharmacokinetic",
+      TRUE
+        ~ "Direct_therapeutic"
+    ),
+
+    # --- Approval class ---
+    approval_class = case_when(
+      str_detect(tolower(approval), "approved") &
+        !str_detect(tolower(approval), "not")
+        ~ "FDA_Approved",
+      TRUE ~ "Not_Approved"
+    ),
+
+    # --- Oncology flag (for downstream filtering) ---
+    oncology_flag = str_detect(
+      tolower(indication), oncology_keywords)
+  )
+
+cat("\n── Interaction class × query set ──\n")
+print(table(dgi_all$interaction_class, dgi_all$query_set))
+
+cat("\n── Approval class × interaction class ──\n")
+print(table(dgi_all$approval_class, dgi_all$interaction_class))
+
+
+# ── 3. Filter priority candidates ────────────────────────────────────────────
+# Priority 1 : FDA approved AND oncology-relevant indication
+#              → strongest candidates for Results section
+# Priority 2 : FDA approved AND direct therapeutic interaction
+#              → included where oncology flag absent but mechanism is direct
+# Priority 3 : All FDA approved (for Supplementary Table)
+#
+# Score threshold: >= 0.1 (single-source, low-evidence interactions excluded)
+
+SCORE_THRESHOLD <- 0.1
+
+priority1 <- dgi_all %>%
+  filter(
+    approval_class  == "FDA_Approved",
+    oncology_flag   == TRUE,
+    score           >= SCORE_THRESHOLD
+  ) %>%
+  arrange(query_set, gene, desc(score)) %>%
+  distinct(gene, drug, .keep_all = TRUE)
+
+priority2 <- dgi_all %>%
+  filter(
+    approval_class    == "FDA_Approved",
+    interaction_class == "Direct_therapeutic",
+    score             >= SCORE_THRESHOLD
+  ) %>%
+  arrange(query_set, gene, desc(score)) %>%
+  distinct(gene, drug, .keep_all = TRUE)
+
+priority_all_fda <- dgi_all %>%
+  filter(approval_class == "FDA_Approved",
+         score          >= SCORE_THRESHOLD) %>%
+  arrange(query_set, gene, desc(score)) %>%
+  distinct(gene, drug, .keep_all = TRUE)
+
+cat("\n── Priority 1 candidates (FDA approved, oncology indication) ──\n")
+print(priority1 %>%
+        select(query_set, gene, drug,
+               interaction_class, score, indication))
+
+cat("\n── Priority 2 candidates (FDA approved, direct therapeutic) ──\n")
+print(priority2 %>%
+        select(query_set, gene, drug,
+               interaction_class, score, indication))
+
+
+# ── 4. Cross-reference with GSEA pathway findings ────────────────────────────
+# Genes overlapping with significant GSEA pathways (Member 4 output)
+# are elevated to top-candidate status — these have both expression
+# evidence (DEG + pathway) AND pharmacological evidence (DGIdb).
+
+pathway_map <- tibble(
+  gene = c(
+    "ABCB1",  "ABCB4",  "ABCC2",  "UGT1A9", "UGT2B4",
+    "SLC22A7","ADH1A",  "SLC2A2", "SLCO1B3",
+    "CYP1A2", "GSTM1",  "MBL2",   "ADRA2A"
+  ),
+  gsea_pathway = c(
+    "Xenobiotic_metabolism_iCCA",
+    "Xenobiotic_metabolism_iCCA",
+    "Xenobiotic_metabolism_iCCA",
+    "Xenobiotic_metabolism_iCCA",
+    "Xenobiotic_metabolism_iCCA",
+    "Xenobiotic_metabolism_iCCA",
+    "Xenobiotic_metabolism_iCCA",
+    "Bile_acid_metabolism_iCCA",
+    "Bile_acid_metabolism_iCCA",
+    "Xenobiotic_metabolism_eCCA",
+    "Xenobiotic_metabolism_eCCA",
+    "Coagulation_eCCA",
+    "Prognostic_signature_gene"
+  )
+)
+
+priority1_annotated <- priority1 %>%
+  left_join(pathway_map, by = "gene") %>%
+  mutate(
+    gsea_pathway  = replace_na(gsea_pathway, "No_pathway_link"),
+    top_candidate = gsea_pathway != "No_pathway_link"
+  )
+
+cat("\n── Priority 1 annotated with GSEA pathway links ──\n")
+print(priority1_annotated %>%
+        select(query_set, gene, drug, approval_class,
+               interaction_class, gsea_pathway,
+               top_candidate, score) %>%
+        arrange(desc(top_candidate), query_set, desc(score)))
+
+
+# ── 5. Build paper-ready summary table ───────────────────────────────────────
+# Table for inclusion in Results section of manuscript.
+# Only top-candidate genes (GSEA-linked) with FDA approval retained.
+
+paper_table <- priority1_annotated %>%
+  filter(approval_class == "FDA_Approved") %>%
+  transmute(
+    Gene              = gene,
+    Drug              = drug,
+    Network           = query_set,
+    Interaction_class = interaction_class,
+    GSEA_pathway      = gsea_pathway,
+    Indication        = indication,
+    Score             = round(score, 3),
+    Top_candidate     = top_candidate
+  ) %>%
+  arrange(desc(Top_candidate), Network, Gene, desc(Score))
+
+cat("\n── FINAL PAPER TABLE ──\n")
+print(paper_table)
+
+
+# ── 6. Save all outputs ───────────────────────────────────────────────────────
+
+write.csv(dgi_all,
+          file.path(OUTPUT_DE, "DGIdb_all_classified.csv"),
+          row.names = FALSE)
+
+write.csv(priority1_annotated,
+          file.path(OUTPUT_DE, "DGIdb_priority1_oncology.csv"),
+          row.names = FALSE)
+
+write.csv(priority_all_fda,
+          file.path(OUTPUT_DE, "DGIdb_FDA_approved_all.csv"),
+          row.names = FALSE)
+
+write.csv(paper_table,
+          file.path(OUTPUT_DE, "DGIdb_paper_table.csv"),
+          row.names = FALSE)
+
+message("\nAll DGIdb tables saved to ", OUTPUT_DE)
+
+
+# ── 7. Figure — classified interaction counts ─────────────────────────────────
+
+plot_df <- dgi_all %>%
+  filter(approval_class == "FDA_Approved",
+         score          >= SCORE_THRESHOLD) %>%
+  count(gene, interaction_class, query_set) %>%
+  mutate(gene = fct_reorder(gene, n, .fun = sum))
+
+p_bar <- ggplot(plot_df,
+                aes(x = gene, y = n, fill = interaction_class)) +
+  geom_bar(stat = "identity", position = "stack", width = 0.7) +
+  facet_wrap(~ query_set, scales = "free", nrow = 1) +
+  scale_fill_manual(
+    values = c(
+      "Direct_therapeutic" = "#2166AC",
+      "Oncology_relevant"  = "#1B7837",
+      "Pharmacokinetic"    = "#D6604D"
+    ),
+    labels = c(
+      "Direct_therapeutic" = "Direct therapeutic",
+      "Oncology_relevant"  = "Oncology-relevant (pharmacokinetic)",
+      "Pharmacokinetic"    = "Pharmacokinetic only"
+    )
+  ) +
+  coord_flip() +
+  labs(
+    title    = "DGIdb FDA-approved drug interactions by gene and interaction class",
+    subtitle = paste0(
+      "Interactions classified as direct therapeutic, oncology-relevant pharmacokinetic,\n",
+      "or pharmacokinetic only. Score threshold \u2265 ", SCORE_THRESHOLD, "."),
+    x        = NULL,
+    y        = "Number of FDA-approved drug interactions",
+    fill     = "Interaction class"
+  ) +
+  theme_classic(base_size = 12) +
+  theme(
+    legend.position  = "bottom",
+    legend.direction = "vertical",
+    strip.text       = element_text(face = "bold", size = 11),
+    plot.subtitle    = element_text(size = 9, colour = "grey40"),
+    axis.text.y      = element_text(face = "bold")
+  )
+
+ggsave(
+  file.path(OUTPUT_FIG, "DGIdb_classified_barplot.png"),
+  p_bar,
+  width  = 12,
+  height = 6,
+  dpi    = 300
+)
+
+message("Figure saved to ", OUTPUT_FIG, "/DGIdb_classified_barplot.png")
+
+
+# ── 8. Session info ───────────────────────────────────────────────────────────
+
+writeLines(
+  capture.output(sessionInfo()),
+  file.path(OUTPUT_DE, "sessionInfo_DGIdb.txt")
+)
+
+cat("\n══════════════════════════════════════════════════\n")
+cat("  DGIdb analysis complete\n")
+cat("  Outputs:\n")
+cat("    results/de/DGIdb_all_classified.csv\n")
+cat("    results/de/DGIdb_priority1_oncology.csv\n")
+cat("    results/de/DGIdb_FDA_approved_all.csv\n")
+cat("    results/de/DGIdb_paper_table.csv\n")
+cat("    results/de/sessionInfo_DGIdb.txt\n")
+cat("    results/figures/DGIdb_classified_barplot.png\n")
+cat("══════════════════════════════════════════════════\n")

@@ -4,7 +4,7 @@ Stage-specific transcriptional programs in intrahepatic (iCCA) vs extrahepatic (
 
 ## Overview
 
-This project identifies shared and divergent stage-specific transcriptional programs between iCCA and eCCA. Analysis is performed at the gene-expression level (TCGA STAR counts) and mapped to pathways (MSigDB Hallmark), comparing early-stage (I/II) vs late-stage (III/IV) within each subtype before contrasting between subtypes. An independent GEO cohort (GSE107943, n=30 iCCA) was used for external validation. The pipeline addresses all six gaps required for Q2 publication, including immune deconvolution, prognostic signature validation, hub gene analysis, mutation overlay, and power analysis.
+This project identifies shared and divergent stage-specific transcriptional programs between iCCA and eCCA. Analysis is performed at the gene-expression level (TCGA STAR counts) and mapped to pathways (MSigDB Hallmark), comparing early-stage (I/II) vs late-stage (III/IV) within each subtype before contrasting between subtypes. An independent GEO cohort (GSE107943, n=30 iCCA) was used for external validation. The pipeline addresses immune deconvolution, prognostic signature validation, hub gene analysis, mutation overlay, and power analysis.
 
 ## Scripts
 
